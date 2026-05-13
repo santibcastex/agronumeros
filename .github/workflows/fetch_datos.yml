@@ -1,0 +1,27 @@
+name: Actualizar datos diarios
+
+on:
+  schedule:
+    # Lunes a viernes a las 19:00 UTC (16:00 ARG) — después del cierre de mercados
+    - cron: '0 19 * * 1-5'
+  workflow_dispatch:  # permite ejecutar manualmente desde GitHub
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install -r scripts/requirements.txt
+
+      - name: Ejecutar fetch_datos.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/fetch_datos.py
