@@ -24,4 +24,6 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_KEY }}
+          BCR_GIX_API_KEY: ${{ secrets.BCR_GIX_API_KEY }}
+          BCR_GIX_SECRET: ${{ secrets.BCR_GIX_SECRET }}
         run: python scripts/fetch_datos.py

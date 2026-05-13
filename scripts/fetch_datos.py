@@ -235,134 +235,99 @@ def fetch_merval_bcra():
     except Exception as e:
         print(f"  ! Merval BCRA: {e}")
 
-# ── 5. PRECIOS GRANOS — FYO.com.ar (scraping) ————————————————————————————
+# ── 5. PRECIOS GRANOS — BCR API GIX (oficial) ————————————————————————————
+
+BCR_GIX_BASE = "https://api.bcr.com.ar/gix"
+
+# ID de grano según documentación API GIX → código en nuestra DB
+GRANOS_GIX = {
+    1:  "trigo_rosario",
+    2:  "maiz_rosario",
+    3:  "sorgo_rosario",
+    20: "girasol_rosario",
+    21: "soja_rosario",
+}
+
+def _bcr_gix_token(api_key: str, secret: str) -> str | None:
+    """Obtiene Bearer Token de la API GIX. Válido 24 horas."""
+    try:
+        r = requests.post(
+            f"{BCR_GIX_BASE}/Login",
+            json={"api_key": api_key, "secret": secret},
+            timeout=15,
+        )
+        r.raise_for_status()
+        token = r.json().get("data", {}).get("token", "")
+        return token or None
+    except Exception as e:
+        print(f"  ! BCR GIX login: {e}")
+        return None
 
 def fetch_granos_fyo():
+    """Obtiene precios de granos Rosario desde BCR API GIX.
+    Si no hay credenciales configuradas, informa y omite.
+    Registrarse en: https://api.bcr.com.ar/form
+    Secrets requeridos: BCR_GIX_API_KEY y BCR_GIX_SECRET
     """
-    Scrapea precios de la Bolsa de Comercio de Rosario publicados en FYO.
-    URL: https://www.fyo.com.ar/precios
-    """
-    print("→ Precios granos (FYO / Rosario)")
-    from bs4 import BeautifulSoup
+    print("→ Precios granos (BCR API GIX)")
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; AgroNumerosBot/1.0)",
-        "Accept-Language": "es-AR,es;q=0.9",
-    }
-
-    # Mapa nombre_en_tabla → codigo cultivo en nuestra DB
-    MAPA_CULTIVOS = {
-        "soja":    "soja_rosario",
-        "maíz":    "maiz_rosario",
-        "maiz":    "maiz_rosario",
-        "trigo":   "trigo_rosario",
-        "girasol": "girasol_rosario",
-        "sorgo":   "sorgo_rosario",
-    }
-
-    try:
-        resp = requests.get("https://www.fyo.com.ar/precios", headers=headers, timeout=20)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-    except Exception as e:
-        print(f"  ✗ FYO scraping: {e}")
+    api_key = os.environ.get("BCR_GIX_API_KEY", "")
+    secret  = os.environ.get("BCR_GIX_SECRET", "")
+    if not api_key or not secret:
+        print("  ! BCR GIX: credenciales no configuradas.")
+        print("    Registrate en https://api.bcr.com.ar/form y agregá")
+        print("    BCR_GIX_API_KEY y BCR_GIX_SECRET como secrets de GitHub.")
         return
 
-    # Buscar tabla de precios disponibles al contado
-    # La estructura puede cambiar; intentamos buscar por texto
-    rows_db = []
+    token = _bcr_gix_token(api_key, secret)
+    if not token:
+        print("  ! BCR GIX: no se pudo obtener token")
+        return
+
+    headers_auth = {"Authorization": token}
+
     cult_res = sb.table("cultivos").select("id,codigo").execute()
     cult_ids = {r["codigo"]: r["id"] for r in cult_res.data}
 
-    # Intentar distintos selectores según estructura de FYO
-    tablas = soup.find_all("table")
-    for tabla in tablas:
-        for tr in tabla.find_all("tr"):
-            celdas = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-            if len(celdas) < 2:
+    rows_db = []
+    for id_grano, codigo_cultivo in GRANOS_GIX.items():
+        cult_id = cult_ids.get(codigo_cultivo)
+        if not cult_id:
+            continue
+        try:
+            url = (
+                f"{BCR_GIX_BASE}/PreciosCamara"
+                f"?idGrano={id_grano}"
+                f"&fechaConcertacionDesde={HOY}"
+                f"&fechaConcertacionHasta={HOY}"
+            )
+            r = requests.get(url, headers=headers_auth, timeout=15)
+            if not r.ok:
+                print(f"  ! BCR GIX grano {id_grano}: HTTP {r.status_code}")
                 continue
-            nombre = celdas[0].lower().strip()
-            # Buscar precio en las celdas
-            precio_ars = None
-            for celda in celdas[1:]:
-                limpio = celda.replace(".", "").replace(",", ".").replace("$", "").strip()
-                try:
-                    val = float(limpio)
-                    if 1000 < val < 5_000_000:  # rango razonable ARS/tn
-                        precio_ars = val
-                        break
-                except ValueError:
-                    continue
-
-            if precio_ars is None:
+            data = r.json().get("data", [])
+            if not data:
                 continue
-
-            for kw, codigo in MAPA_CULTIVOS.items():
-                if kw in nombre:
-                    cult_id = cult_ids.get(codigo)
-                    if cult_id:
-                        rows_db.append({
-                            "cultivo_id": cult_id,
-                            "fecha": HOY,
-                            "precio_ars": precio_ars,
-                            "zona": "rosario",
-                        })
-                    break
+            ultimo = sorted(data, key=lambda x: x.get("fecha_Operacion_Pizarra", ""))[-1]
+            precio_ars = ultimo.get("precio_Cotizacion")
+            precio_usd = ultimo.get("precio_Dolar")
+            fecha      = (ultimo.get("fecha_Operacion_Pizarra") or HOY)[:10]
+            if precio_ars:
+                rows_db.append({
+                    "cultivo_id": cult_id,
+                    "fecha":      fecha,
+                    "precio_ars": float(precio_ars),
+                    "precio_usd": float(precio_usd) if precio_usd else None,
+                    "zona":       "rosario",
+                })
+        except Exception as e:
+            print(f"  ! BCR GIX grano {id_grano}: {e}")
+        time.sleep(0.3)
 
     if rows_db:
         upsert("precios_agro", rows_db, "cultivo_id,fecha")
     else:
-        print("  ! FYO: no se encontraron precios en la tabla — estructura puede haber cambiado")
-        _fetch_granos_bcr_alternativo(cult_ids)
-
-def _fetch_granos_bcr_alternativo(cult_ids: dict):
-    """Intento alternativo: scraping BCR."""
-    from bs4 import BeautifulSoup
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; AgroNumerosBot/1.0)"}
-    MAPA = {
-        "soja":    "soja_rosario",
-        "maíz":    "maiz_rosario",
-        "maiz":    "maiz_rosario",
-        "trigo":   "trigo_rosario",
-        "girasol": "girasol_rosario",
-        "sorgo":   "sorgo_rosario",
-    }
-    try:
-        resp = requests.get("https://www.bcr.com.ar/es/mercados/granos/precios-de-pizarra",
-                            headers=headers, timeout=20)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        rows_db = []
-        for tr in soup.find_all("tr"):
-            celdas = [td.get_text(strip=True) for td in tr.find_all(["td","th"])]
-            if len(celdas) < 2:
-                continue
-            nombre = celdas[0].lower()
-            for kw, codigo in MAPA.items():
-                if kw in nombre:
-                    for celda in celdas[1:]:
-                        limpio = celda.replace(".","").replace(",",".").replace("$","").strip()
-                        try:
-                            val = float(limpio)
-                            if 1000 < val < 5_000_000:
-                                cult_id = cult_ids.get(codigo)
-                                if cult_id:
-                                    rows_db.append({
-                                        "cultivo_id": cult_id,
-                                        "fecha": HOY,
-                                        "precio_ars": val,
-                                        "zona": "rosario",
-                                    })
-                                break
-                        except ValueError:
-                            continue
-                    break
-        if rows_db:
-            upsert("precios_agro", rows_db, "cultivo_id,fecha")
-            print(f"  ✓ BCR alternativo: {len(rows_db)} filas")
-        else:
-            print("  ! BCR alternativo: tampoco encontró datos")
-    except Exception as e:
-        print(f"  ! BCR alternativo: {e}")
+        print("  ! BCR GIX: sin datos para hoy")
 
 # ── 6. COMBUSTIBLES (ENARSA/SE) ————————————————————————————————————————————
 
