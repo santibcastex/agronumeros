@@ -381,6 +381,309 @@ def fetch_combustibles():
 
     upsert("combustibles_provincia", rows, "provincia,producto,anio,mes")
 
+# ── 7. GANADERÍA — LINIERS (datos.gob.ar MAGyP) ──────────────────────────────
+
+# Mapeo: texto de categoría del dataset → código interno
+LINIERS_CAT_MAP = {
+    "novillo especial":   ("novillo",    "novillo_especial",   "Novillo Especial"),
+    "novillo 1a":         ("novillo",    "novillo_1a",         "Novillo 1a"),
+    "novillo 2a":         ("novillo",    "novillo_2a",         "Novillo 2a"),
+    "novillo 3a":         ("novillo",    "novillo_3a",         "Novillo 3a"),
+    "novillo liviano":    ("novillo",    "novillo_liviano",    "Novillo Liviano"),
+    "novillito pesado":   ("novillito",  "novillito_pesado",   "Novillito Pesado"),
+    "novillito liviano":  ("novillito",  "novillito_liviano",  "Novillito Liviano"),
+    "vaca conserva":      ("vaca",       "vaca_conserva",      "Vaca Conserva"),
+    "vaca manufactura":   ("vaca",       "vaca_manufactura",   "Vaca Manufactura"),
+    "vaquillona pesada":  ("vaquillona", "vaquillona_pesada",  "Vaquillona Pesada"),
+    "vaquillona liviana": ("vaquillona", "vaquillona_liviana", "Vaquillona Liviana"),
+    "toro":               ("toro",       "toro",               "Toro"),
+    "mej":                ("mej",        "mej",                "MeJ"),
+    "mestizo en jaula":   ("mej",        "mej",                "MeJ"),
+}
+
+def _liniers_buscar_recurso():
+    """Busca en datos.gob.ar el recurso CSV de precios de Liniers (MAGyP)."""
+    try:
+        paquetes_conocidos = [
+            "agroindustria-precios-hacienda-en-pie",
+            "agroindustria-mercado-liniers",
+            "agroindustria-precios-hacienda-vacuna",
+        ]
+        for pkg_id in paquetes_conocidos:
+            r = requests.get(
+                f"https://datos.gob.ar/api/3/action/package_show?id={pkg_id}",
+                timeout=15,
+            )
+            if r.ok and r.json().get("success"):
+                resources = r.json()["result"].get("resources", [])
+                for res in resources:
+                    fmt = res.get("format", "").upper()
+                    name = res.get("name", "").lower()
+                    if fmt in ("CSV", "JSON") and any(k in name for k in ("precio", "liniers", "hacienda")):
+                        return res["id"], res.get("url", "")
+        # Fallback: búsqueda dinámica
+        r = requests.get(
+            "https://datos.gob.ar/api/3/action/package_search"
+            "?q=precios+hacienda+liniers&fq=organization:agroindustria&rows=5",
+            timeout=15,
+        )
+        if r.ok:
+            for pkg in r.json().get("result", {}).get("results", []):
+                for res in pkg.get("resources", []):
+                    if res.get("format", "").upper() in ("CSV", "JSON"):
+                        return res["id"], res.get("url", "")
+    except Exception as e:
+        print(f"  ! Liniers búsqueda recurso: {e}")
+    return None, None
+
+def fetch_liniers():
+    """Obtiene precios diarios de hacienda del Mercado de Liniers (datos.gob.ar)."""
+    print("→ Precios Liniers (datos.gob.ar MAGyP)")
+
+    recurso_id, recurso_url = _liniers_buscar_recurso()
+    if not recurso_id:
+        print("  ! Liniers: no se encontró el recurso en datos.gob.ar")
+        return
+
+    desde = (datetime.date.today() - datetime.timedelta(days=60)).isoformat()
+
+    try:
+        url = (
+            f"https://datos.gob.ar/api/3/action/datastore_search"
+            f"?resource_id={recurso_id}&limit=5000"
+        )
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        records = r.json().get("result", {}).get("records", [])
+    except Exception as e:
+        print(f"  ! Liniers fetch datos: {e}")
+        return
+
+    diario_rows, semanal_acum = [], {}
+
+    for rec in records:
+        try:
+            # Normalizar nombre de columnas (pueden variar)
+            fecha_str = (rec.get("fecha") or rec.get("fecha_faena") or rec.get("date") or "")[:10]
+            if not fecha_str or fecha_str < desde:
+                continue
+            fecha = datetime.date.fromisoformat(fecha_str)
+
+            raw_cat = (rec.get("categoria") or rec.get("tipo") or "").lower().strip()
+            match = LINIERS_CAT_MAP.get(raw_cat)
+            if not match:
+                # Buscar coincidencia parcial
+                for k, v in LINIERS_CAT_MAP.items():
+                    if k in raw_cat or raw_cat in k:
+                        match = v
+                        break
+            if not match:
+                continue
+
+            categoria, subcategoria, subcat_nombre = match
+            precio = float(rec.get("precio_promedio") or rec.get("precio") or 0)
+            cabezas = int(rec.get("cabezas") or rec.get("cantidad") or 0)
+            kg_prom = float(rec.get("kg_promedio") or rec.get("peso_promedio") or rec.get("kg_prom") or 0) or None
+
+            if precio <= 0:
+                continue
+
+            diario_rows.append({
+                "fecha": fecha_str,
+                "categoria": categoria,
+                "subcategoria": subcategoria,
+                "subcategoria_nombre": subcat_nombre,
+                "precio": precio,
+                "cabezas": cabezas or None,
+                "kg_prom": kg_prom,
+            })
+
+            # Acumular para semanal
+            sem = (fecha - datetime.timedelta(days=fecha.weekday())).isoformat()
+            k = (sem, categoria)
+            if k not in semanal_acum:
+                semanal_acum[k] = {"sum_p": 0.0, "sum_cab": 0, "count": 0}
+            semanal_acum[k]["sum_p"]   += precio * (cabezas or 1)
+            semanal_acum[k]["sum_cab"] += cabezas or 0
+            semanal_acum[k]["count"]   += 1
+        except Exception:
+            continue
+
+    upsert("liniers_diario", diario_rows, "fecha,subcategoria")
+
+    sem_rows = []
+    for (sem, categoria), v in semanal_acum.items():
+        denom = v["sum_cab"] if v["sum_cab"] > 0 else v["count"]
+        sem_rows.append({
+            "semana": sem,
+            "categoria": categoria,
+            "precio_promedio": round(v["sum_p"] / denom, 2),
+            "cabezas_total": v["sum_cab"] or None,
+            "fuente": "liniers",
+        })
+    upsert("precios_ganaderia_semanal", sem_rows, "semana,categoria,fuente")
+
+# ── 8. GANADERÍA — EXISTENCIAS BOVINAS (SENASA / datos.gob.ar) ───────────────
+
+def fetch_existencias_bovinas():
+    """Carga el censo anual de existencias bovinas desde datos.gob.ar (SENASA)."""
+    print("→ Existencias bovinas (SENASA / datos.gob.ar)")
+
+    paquetes = [
+        "senasa-existencias-bovinas",
+        "agroindustria-senasa-existencias-bovinas",
+        "senasa-bovinos",
+    ]
+    recurso_id = None
+    for pkg_id in paquetes:
+        try:
+            r = requests.get(
+                f"https://datos.gob.ar/api/3/action/package_show?id={pkg_id}",
+                timeout=15,
+            )
+            if r.ok and r.json().get("success"):
+                for res in r.json()["result"].get("resources", []):
+                    if res.get("format", "").upper() in ("CSV", "JSON"):
+                        recurso_id = res["id"]
+                        break
+        except Exception:
+            pass
+        if recurso_id:
+            break
+
+    if not recurso_id:
+        # Búsqueda dinámica
+        try:
+            r = requests.get(
+                "https://datos.gob.ar/api/3/action/package_search"
+                "?q=existencias+bovinas+provincia&fq=organization:senasa&rows=5",
+                timeout=15,
+            )
+            if r.ok:
+                for pkg in r.json().get("result", {}).get("results", []):
+                    for res in pkg.get("resources", []):
+                        if res.get("format", "").upper() in ("CSV", "JSON"):
+                            recurso_id = res["id"]
+                            break
+                    if recurso_id:
+                        break
+        except Exception as e:
+            print(f"  ! Existencias bovinas búsqueda: {e}")
+
+    if not recurso_id:
+        print("  ! Existencias bovinas: recurso no encontrado en datos.gob.ar")
+        return
+
+    try:
+        url = (
+            f"https://datos.gob.ar/api/3/action/datastore_search"
+            f"?resource_id={recurso_id}&limit=5000"
+        )
+        r = requests.get(url, timeout=60)
+        r.raise_for_status()
+        records = r.json().get("result", {}).get("records", [])
+    except Exception as e:
+        print(f"  ! Existencias bovinas fetch: {e}")
+        return
+
+    rows = []
+    CAT_MAP = {
+        "vacas": ["vaca", "vacas"],
+        "vaquillonas": ["vaquillona", "vaquillonas"],
+        "novillos": ["novillo", "novillos"],
+        "novillitos": ["novillito", "novillitos"],
+        "terneros": ["ternero", "terneros"],
+        "terneras": ["ternera", "terneras"],
+        "toros": ["toro", "toros"],
+        "toritos": ["torito", "toritos"],
+        "bueyes": ["buey", "bueyes"],
+    }
+
+    for rec in records:
+        try:
+            anio = int(rec.get("anio") or rec.get("año") or rec.get("year") or 0)
+            if not anio:
+                continue
+            prov = (rec.get("provincia") or rec.get("province") or "").upper().strip()
+            dpto = (rec.get("departamento") or rec.get("partido") or "").upper().strip()
+
+            row = {"anio": anio, "provincia": prov, "departamento": dpto}
+            for col, aliases in CAT_MAP.items():
+                for alias in aliases:
+                    val = rec.get(alias) or rec.get(col)
+                    if val is not None:
+                        try:
+                            row[col] = int(float(str(val).replace(",", ".")))
+                        except (ValueError, TypeError):
+                            pass
+                        break
+            rows.append(row)
+        except Exception:
+            continue
+
+    upsert("ganaderia_existencias_bovinas", rows, "anio,provincia,departamento")
+
+# ── 9. GANADERÍA — ROSGAN (scraping rosgan.com.ar) ────────────────────────────
+
+def fetch_rosgan():
+    """Intenta obtener índices de Rosgan (Cría/Invernada) desde rosgan.com.ar."""
+    print("→ Rosgan Cría/Invernada (rosgan.com.ar)")
+    from bs4 import BeautifulSoup
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept-Language": "es-AR,es;q=0.9",
+    }
+
+    MAPA_CATS = {
+        "vaca cría":       ("cria",      "vaca_cria"),
+        "vaca de cría":    ("cria",      "vaca_cria"),
+        "ternero":         ("cria",      "ternero"),
+        "ternera":         ("cria",      "ternera"),
+        "vaquillona":      ("cria",      "vaquillona_cria"),
+        "novillo":         ("invernada", "novillo"),
+        "novillito":       ("invernada", "novillito"),
+        "vaquillona inv":  ("invernada", "vaquillona_inv"),
+    }
+
+    try:
+        resp = requests.get("https://rosgan.com.ar/indices", headers=headers, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception as e:
+        print(f"  ! Rosgan: {e}")
+        return
+
+    rows = []
+    for tabla in soup.find_all("table"):
+        for tr in tabla.find_all("tr"):
+            celdas = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+            if len(celdas) < 2:
+                continue
+            nombre = celdas[0].lower().strip()
+            for kw, (tipo, cat) in MAPA_CATS.items():
+                if kw in nombre:
+                    for celda in celdas[1:]:
+                        limpio = celda.replace(",", ".").replace("$", "").replace("U$S", "").strip()
+                        try:
+                            precio = float(limpio)
+                            if 0.1 < precio < 10000:
+                                rows.append({
+                                    "fecha": HOY,
+                                    "tipo": tipo,
+                                    "categoria": cat,
+                                    "precio": precio,
+                                })
+                                break
+                        except ValueError:
+                            continue
+                    break
+
+    if rows:
+        upsert("rosgan_precios", rows, "fecha,tipo,categoria")
+    else:
+        print("  ! Rosgan: sin datos (sitio puede usar JS rendering)")
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -394,6 +697,9 @@ def main():
     fetch_merval_bcra()
     fetch_granos_fyo()
     fetch_combustibles()
+    fetch_liniers()
+    fetch_existencias_bovinas()
+    fetch_rosgan()
 
     print(f"\n✅ Listo.\n")
 
