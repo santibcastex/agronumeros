@@ -381,145 +381,141 @@ def fetch_combustibles():
 
     upsert("combustibles_provincia", rows, "provincia,producto,anio,mes")
 
-# ── 7. GANADERÍA — LINIERS (datos.gob.ar MAGyP) ──────────────────────────────
+# ── 7. GANADERÍA — MAG Mercado Agroganadero (scraping) ───────────────────────
 
-# Mapeo: texto de categoría del dataset → código interno
-LINIERS_CAT_MAP = {
-    "novillo especial":   ("novillo",    "novillo_especial",   "Novillo Especial"),
-    "novillo 1a":         ("novillo",    "novillo_1a",         "Novillo 1a"),
-    "novillo 2a":         ("novillo",    "novillo_2a",         "Novillo 2a"),
-    "novillo 3a":         ("novillo",    "novillo_3a",         "Novillo 3a"),
-    "novillo liviano":    ("novillo",    "novillo_liviano",    "Novillo Liviano"),
-    "novillito pesado":   ("novillito",  "novillito_pesado",   "Novillito Pesado"),
-    "novillito liviano":  ("novillito",  "novillito_liviano",  "Novillito Liviano"),
-    "vaca conserva":      ("vaca",       "vaca_conserva",      "Vaca Conserva"),
-    "vaca manufactura":   ("vaca",       "vaca_manufactura",   "Vaca Manufactura"),
-    "vaquillona pesada":  ("vaquillona", "vaquillona_pesada",  "Vaquillona Pesada"),
-    "vaquillona liviana": ("vaquillona", "vaquillona_liviana", "Vaquillona Liviana"),
-    "toro":               ("toro",       "toro",               "Toro"),
-    "mej":                ("mej",        "mej",                "MeJ"),
-    "mestizo en jaula":   ("mej",        "mej",                "MeJ"),
-}
+MAG_URL = "https://mercadoagroganadero.com.ar/dll/hacienda1.dll/haciinfo000502"
 
-def _liniers_buscar_recurso():
-    """Busca en datos.gob.ar el recurso CSV de precios de Liniers (MAGyP)."""
+# Mapeo: fragmento del texto de categoría → (categoria, subcategoria, nombre_display)
+MAG_CAT_MAP = [
+    ("novillos esp.joven + 430",  "novillo",    "novillo_esp_joven_430",  "Novillo Esp. Joven +430"),
+    ("novillos esp.joven",        "novillo",    "novillo_esp_joven",      "Novillo Esp. Joven"),
+    ("novillos regular h 430",    "novillo",    "novillo_regular_h430",   "Novillo Regular h.430"),
+    ("novillos regular + 430",    "novillo",    "novillo_regular_430",    "Novillo Regular +430"),
+    ("novillos regular",          "novillo",    "novillo_regular",        "Novillo Regular"),
+    ("novillos",                  "novillo",    "novillo",                "Novillo"),
+    ("novillitos esp. h 390",     "novillito",  "novillito_esp_h390",     "Novillito Esp. h.390"),
+    ("novillitos esp. + 390",     "novillito",  "novillito_esp_390",      "Novillito Esp. +390"),
+    ("novillitos esp.",           "novillito",  "novillito_esp",          "Novillito Esp."),
+    ("novillitos regular",        "novillito",  "novillito_regular",      "Novillito Regular"),
+    ("novillitos",                "novillito",  "novillito",              "Novillito"),
+    ("vaquillonas esp. h 390",    "vaquillona", "vaquillona_esp_h390",    "Vaquillona Esp. h.390"),
+    ("vaquillonas esp. + 390",    "vaquillona", "vaquillona_esp_390",     "Vaquillona Esp. +390"),
+    ("vaquillonas esp.",          "vaquillona", "vaquillona_esp",         "Vaquillona Esp."),
+    ("vaquillonas regular",       "vaquillona", "vaquillona_regular",     "Vaquillona Regular"),
+    ("vaquillonas",               "vaquillona", "vaquillona",             "Vaquillona"),
+    ("vacas esp.joven h 430",     "vaca",       "vaca_esp_joven_h430",    "Vaca Esp. Joven h.430"),
+    ("vacas esp.joven + 430",     "vaca",       "vaca_esp_joven_430",     "Vaca Esp. Joven +430"),
+    ("vacas esp.joven",           "vaca",       "vaca_esp_joven",         "Vaca Esp. Joven"),
+    ("vacas regular",             "vaca",       "vaca_regular",           "Vaca Regular"),
+    ("vacas conserva buena",      "vaca",       "vaca_conserva_buena",    "Vaca Conserva Buena"),
+    ("vacas conserva inferior",   "vaca",       "vaca_conserva_inf",      "Vaca Conserva Inf."),
+    ("vacas conserva",            "vaca",       "vaca_conserva",          "Vaca Conserva"),
+    ("vacas",                     "vaca",       "vaca",                   "Vaca"),
+    ("toros",                     "toro",       "toro",                   "Toro"),
+    ("mej",                       "mej",        "mej",                    "MeJ"),
+]
+
+def _mag_match_categoria(nombre: str):
+    """Busca la categoría MAG que mejor coincide con el nombre dado (orden: más específico primero)."""
+    n = nombre.lower().strip()
+    for kw, categoria, subcategoria, display in MAG_CAT_MAP:
+        if kw in n:
+            return categoria, subcategoria, display
+    return None, None, None
+
+def _mag_parse_num(texto: str) -> float | None:
+    """Convierte '4.356.966' o '4356966' a float. Devuelve None si no es parseable."""
+    limpio = texto.replace(".", "").replace(",", "").replace("$", "").replace(" ", "").strip()
     try:
-        paquetes_conocidos = [
-            "agroindustria-precios-hacienda-en-pie",
-            "agroindustria-mercado-liniers",
-            "agroindustria-precios-hacienda-vacuna",
-        ]
-        for pkg_id in paquetes_conocidos:
-            r = requests.get(
-                f"https://datos.gob.ar/api/3/action/package_show?id={pkg_id}",
-                timeout=15,
-            )
-            if r.ok and r.json().get("success"):
-                resources = r.json()["result"].get("resources", [])
-                for res in resources:
-                    fmt = res.get("format", "").upper()
-                    name = res.get("name", "").lower()
-                    if fmt in ("CSV", "JSON") and any(k in name for k in ("precio", "liniers", "hacienda")):
-                        return res["id"], res.get("url", "")
-        # Fallback: búsqueda dinámica
-        r = requests.get(
-            "https://datos.gob.ar/api/3/action/package_search"
-            "?q=precios+hacienda+liniers&fq=organization:agroindustria&rows=5",
-            timeout=15,
-        )
-        if r.ok:
-            for pkg in r.json().get("result", {}).get("results", []):
-                for res in pkg.get("resources", []):
-                    if res.get("format", "").upper() in ("CSV", "JSON"):
-                        return res["id"], res.get("url", "")
-    except Exception as e:
-        print(f"  ! Liniers búsqueda recurso: {e}")
-    return None, None
+        val = float(limpio)
+        return val if val > 0 else None
+    except ValueError:
+        return None
 
 def fetch_liniers():
-    """Obtiene precios diarios de hacienda del Mercado de Liniers (datos.gob.ar)."""
-    print("→ Precios Liniers (datos.gob.ar MAGyP)")
+    """Obtiene precios del día del Mercado Agroganadero (MAG, Cañuelas).
+    La URL haciinfo000502 sirve los precios provisorios del día actual.
+    precio almacenado = ARS/kg = promedio_por_cabeza / kg_promedio
+    """
+    print("→ Precios hacienda MAG (mercadoagroganadero.com.ar)")
+    from bs4 import BeautifulSoup
 
-    recurso_id, recurso_url = _liniers_buscar_recurso()
-    if not recurso_id:
-        print("  ! Liniers: no se encontró el recurso en datos.gob.ar")
-        return
-
-    desde = (datetime.date.today() - datetime.timedelta(days=60)).isoformat()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept-Language": "es-AR,es;q=0.9",
+    }
 
     try:
-        url = (
-            f"https://datos.gob.ar/api/3/action/datastore_search"
-            f"?resource_id={recurso_id}&limit=5000"
-        )
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-        records = r.json().get("result", {}).get("records", [])
+        resp = requests.get(MAG_URL, headers=headers, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
     except Exception as e:
-        print(f"  ! Liniers fetch datos: {e}")
+        print(f"  ! MAG fetch: {e}")
         return
 
-    diario_rows, semanal_acum = [], {}
+    diario_rows = []
+    semanal_acum = {}
+    fecha = datetime.date.today()
+    fecha_str = fecha.isoformat()
 
-    for rec in records:
-        try:
-            # Normalizar nombre de columnas (pueden variar)
-            fecha_str = (rec.get("fecha") or rec.get("fecha_faena") or rec.get("date") or "")[:10]
-            if not fecha_str or fecha_str < desde:
-                continue
-            fecha = datetime.date.fromisoformat(fecha_str)
-
-            raw_cat = (rec.get("categoria") or rec.get("tipo") or "").lower().strip()
-            match = LINIERS_CAT_MAP.get(raw_cat)
-            if not match:
-                # Buscar coincidencia parcial
-                for k, v in LINIERS_CAT_MAP.items():
-                    if k in raw_cat or raw_cat in k:
-                        match = v
-                        break
-            if not match:
+    for tabla in soup.find_all("table"):
+        for tr in tabla.find_all("tr"):
+            celdas = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+            if len(celdas) < 7:
                 continue
 
-            categoria, subcategoria, subcat_nombre = match
-            precio = float(rec.get("precio_promedio") or rec.get("precio") or 0)
-            cabezas = int(rec.get("cabezas") or rec.get("cantidad") or 0)
-            kg_prom = float(rec.get("kg_promedio") or rec.get("peso_promedio") or rec.get("kg_prom") or 0) or None
-
-            if precio <= 0:
+            nombre_raw = celdas[0].strip()
+            if not nombre_raw or "------" in nombre_raw or nombre_raw.upper() in ("CATEGORÍA", "CATEGORIA", ""):
                 continue
+
+            categoria, subcategoria, display = _mag_match_categoria(nombre_raw)
+            if not categoria:
+                continue
+
+            # Columnas: Categoría | Mínimo | Máximo | Promedio | Mediana | Cabezas | Importe | Kgs | Prom.Kgs
+            promedio = _mag_parse_num(celdas[3]) if len(celdas) > 3 else None
+            cabezas  = _mag_parse_num(celdas[5]) if len(celdas) > 5 else None
+            kg_prom  = _mag_parse_num(celdas[8]) if len(celdas) > 8 else None
+
+            if not promedio or not kg_prom or kg_prom <= 0:
+                continue
+
+            precio_kg = round(promedio / kg_prom, 2)  # ARS/kg
 
             diario_rows.append({
-                "fecha": fecha_str,
-                "categoria": categoria,
-                "subcategoria": subcategoria,
-                "subcategoria_nombre": subcat_nombre,
-                "precio": precio,
-                "cabezas": cabezas or None,
-                "kg_prom": kg_prom,
+                "fecha":              fecha_str,
+                "categoria":          categoria,
+                "subcategoria":       subcategoria,
+                "subcategoria_nombre": display,
+                "precio":             precio_kg,
+                "cabezas":            int(cabezas) if cabezas else None,
+                "kg_prom":            kg_prom,
             })
 
-            # Acumular para semanal
+            # Acumular semanal ponderado por cabezas
             sem = (fecha - datetime.timedelta(days=fecha.weekday())).isoformat()
             k = (sem, categoria)
             if k not in semanal_acum:
-                semanal_acum[k] = {"sum_p": 0.0, "sum_cab": 0, "count": 0}
-            semanal_acum[k]["sum_p"]   += precio * (cabezas or 1)
-            semanal_acum[k]["sum_cab"] += cabezas or 0
-            semanal_acum[k]["count"]   += 1
-        except Exception:
-            continue
+                semanal_acum[k] = {"sum_p": 0.0, "sum_cab": 0}
+            peso = int(cabezas) if cabezas else 1
+            semanal_acum[k]["sum_p"]   += precio_kg * peso
+            semanal_acum[k]["sum_cab"] += peso
+
+    if not diario_rows:
+        print("  ! MAG: sin datos (día sin operaciones o estructura cambió)")
+        return
 
     upsert("liniers_diario", diario_rows, "fecha,subcategoria")
 
     sem_rows = []
     for (sem, categoria), v in semanal_acum.items():
-        denom = v["sum_cab"] if v["sum_cab"] > 0 else v["count"]
+        denom = v["sum_cab"] if v["sum_cab"] > 0 else 1
         sem_rows.append({
-            "semana": sem,
-            "categoria": categoria,
+            "semana":          sem,
+            "categoria":       categoria,
             "precio_promedio": round(v["sum_p"] / denom, 2),
-            "cabezas_total": v["sum_cab"] or None,
-            "fuente": "liniers",
+            "cabezas_total":   v["sum_cab"] or None,
+            "fuente":          "mag",
         })
     upsert("precios_ganaderia_semanal", sem_rows, "semana,categoria,fuente")
 
