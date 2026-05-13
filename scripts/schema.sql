@@ -79,9 +79,11 @@ create table if not exists exportaciones_agro (
 create table if not exists indicadores (
   id      serial primary key,
   codigo  text not null unique,
-  nombre  text,
-  unidad  text
+  nombre  text
 );
+-- Agregar columna unidad si no existe (por si la tabla ya estaba creada)
+alter table indicadores add column if not exists nombre text;
+alter table indicadores add column if not exists unidad text;
 
 insert into indicadores (codigo, nombre, unidad) values
   ('sp500',           'S&P 500',        'USD'),
