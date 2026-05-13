@@ -669,6 +669,161 @@ def fetch_rosgan():
     else:
         print("  ! Rosgan: sin datos (sitio puede usar JS rendering)")
 
+# ── 10. REMATES — Entre Surcos y Corrales ────────────────────────────────────
+
+ESYC_BASE = "https://www.entresurcosycorralesya.com/remates-generales.html"
+
+def fetch_remates():
+    """Scrapea próximos remates desde entresurcosycorralesya.com.
+    URL: /remates-generales.html?desde=YYYY-MM-DD&hasta=YYYY-MM-DD
+    HTML estático, sin JavaScript.
+    """
+    print("→ Remates (Entre Surcos y Corrales)")
+    from bs4 import BeautifulSoup
+
+    hoy   = datetime.date.today()
+    hasta = (hoy + datetime.timedelta(days=90)).isoformat()
+    url   = f"{ESYC_BASE}?desde={hoy.isoformat()}&hasta={hasta}&consignatario=&zona="
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept-Language": "es-AR,es;q=0.9",
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception as e:
+        print(f"  ! ESYC fetch: {e}")
+        return
+
+    rows = []
+    fecha_actual = None
+
+    for el in soup.find_all(True):
+        texto = el.get_text(strip=True)
+
+        # Detectar encabezado de fecha (ej: "Miercoles 13 de Mayo de 2026" o "13/05/2026")
+        if el.name in ("h2", "h3", "h4", "strong", "b"):
+            try:
+                # Formato "13/05/2026"
+                fecha_actual = datetime.datetime.strptime(texto, "%d/%m/%Y").date().isoformat()
+                continue
+            except ValueError:
+                pass
+            # Formato largo: intentar extraer fecha con dateutil si falla
+            import re
+            m = re.search(r'(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})', texto, re.IGNORECASE)
+            if m:
+                MESES = {
+                    "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
+                    "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12,
+                }
+                mes = MESES.get(m.group(2).lower())
+                if mes:
+                    try:
+                        fecha_actual = datetime.date(int(m.group(3)), mes, int(m.group(1))).isoformat()
+                    except ValueError:
+                        pass
+
+        # Detectar bloque de remate (contiene fecha inline dd/mm/YYYY)
+        import re
+        m_fecha = re.search(r'(\d{2}/\d{2}/\d{4})', texto)
+        if not m_fecha or el.name not in ("div", "li", "article", "tr", "section"):
+            continue
+
+        try:
+            fecha_remate = datetime.datetime.strptime(m_fecha.group(1), "%d/%m/%Y").date().isoformat()
+        except ValueError:
+            fecha_remate = fecha_actual or hoy.isoformat()
+
+        # Lugar: "Buenos Aires - Ayacucho" → provincia, localidad
+        lugar_raw = ""
+        lugar_el = el.find(class_=re.compile(r'lugar|location|ciudad|localidad', re.I))
+        if not lugar_el:
+            # Buscar texto que contenga " - " como separador de provincia-localidad
+            for child in el.find_all(["b", "strong", "span", "a"]):
+                t = child.get_text(strip=True)
+                if " - " in t and len(t) < 60:
+                    lugar_raw = t
+                    break
+        else:
+            lugar_raw = lugar_el.get_text(strip=True)
+
+        provincia, localidad = "", ""
+        if " - " in lugar_raw:
+            partes = lugar_raw.split(" - ", 1)
+            provincia = partes[0].strip()
+            localidad = partes[1].strip()
+
+        # Tipo/categorías
+        categorias = ""
+        for child in el.find_all(["span", "p", "div", "small"]):
+            t = child.get_text(strip=True)
+            if any(k in t.lower() for k in ["faena", "invernada", "cría", "cria", "conserva", "consumo"]):
+                categorias = t
+                break
+
+        # Hora
+        hora = ""
+        m_hora = re.search(r'(\d{1,2}[\.:]\d{2})\s*hs', texto, re.IGNORECASE)
+        if m_hora:
+            hora = m_hora.group(1).replace(".", ":") + "hs"
+
+        # Cabezas (número grande al final o destacado)
+        total_cabezas = None
+        m_cab = re.findall(r'\b(\d{1,2}[\.,]\d{3}|\d{3,6})\b', texto)
+        for mc in reversed(m_cab):
+            try:
+                val = int(mc.replace(".", "").replace(",", ""))
+                if 50 <= val <= 100_000:
+                    total_cabezas = val
+                    break
+            except ValueError:
+                pass
+
+        # Consignataria (imagen alt o texto de logo)
+        consignataria = ""
+        img = el.find("img")
+        if img:
+            consignataria = (img.get("alt") or img.get("title") or "").strip()
+
+        if not fecha_remate or (not localidad and not consignataria):
+            continue
+
+        rows.append({
+            "nombre":        f"{consignataria} — {localidad}" if consignataria else lugar_raw,
+            "fecha":         fecha_remate,
+            "hora":          hora or None,
+            "lugar":         lugar_raw or None,
+            "localidad":     localidad or None,
+            "provincia":     provincia or None,
+            "categorias":    categorias or None,
+            "total_cabezas": total_cabezas,
+            "url_fuente":    url,
+            "activo":        True,
+        })
+
+    # Deduplicar por fecha+lugar+consignataria
+    vistos = set()
+    rows_uniq = []
+    for r in rows:
+        k = (r["fecha"], r["lugar"], r["nombre"])
+        if k not in vistos:
+            vistos.add(k)
+            rows_uniq.append(r)
+
+    if rows_uniq:
+        # Remates no tiene conflict key simple; usar insert ignorando duplicados
+        try:
+            sb.table("remates").upsert(rows_uniq, on_conflict="nombre,fecha").execute()
+            print(f"  ✓ remates: {len(rows_uniq)} eventos")
+        except Exception as e:
+            print(f"  ✗ remates upsert: {e}")
+    else:
+        print("  ! ESYC: sin remates encontrados (estructura puede haber cambiado)")
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -685,6 +840,7 @@ def main():
     fetch_liniers()
     fetch_existencias_bovinas()
     fetch_rosgan()
+    fetch_remates()
 
     print(f"\n✅ Listo.\n")
 

@@ -98,7 +98,8 @@ create table if not exists remates (
   url_fuente        text,
   url_flyer         text,
   flyer_tipo        text,
-  activo            boolean default true
+  activo            boolean default true,
+  unique (nombre, fecha)
 );
 create index if not exists idx_remates_fecha on remates(fecha);
 
