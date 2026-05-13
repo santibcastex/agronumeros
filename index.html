@@ -3472,8 +3472,8 @@ let marCargadoFlag = false
 applyTheme()
 
 // ── Supabase ────────────────────────────────────────────────────────
-const SUPABASE_URL     = 'https://dbvjdjsqvytphkmauzep.supabase.co'
-const SUPABASE_ANON_KEY = 'sb_publishable_II8D19xUs8uhA-W1o6ldfQ_tulkREPx'
+const SUPABASE_URL     = 'https://szjxcfntvdyklnnuyepg.supabase.co'
+const SUPABASE_ANON_KEY = 'sb_publishable_QRCmHDhrHk6rElc169-udw_GiSGiK-B'
 
 const CULTIVOS = {
   soja_rosario:    { nombre: 'Soja',    color: 'var(--soja)',    hex: '#16a34a' },
@@ -3904,7 +3904,7 @@ async function cargarRetenciones() {
 }
 
 // ── Clima ─────────────────────────────────────────────────────────────
-const STORAGE_ORA = 'https://dbvjdjsqvytphkmauzep.supabase.co/storage/v1/object/public/imagenes-ora'
+const STORAGE_ORA = 'https://szjxcfntvdyklnnuyepg.supabase.co/storage/v1/object/public/imagenes-ora'
 
 const CULTIVOS_AGUA = [
   { cod: 'S1',  col: 's1',  nombre: 'Soja 1ª',      mesInicio: 10 },
@@ -3988,7 +3988,7 @@ let _geoJSON = null
 async function fetchGeoJSON() {
   if (_geoJSON) return _geoJSON
   // GeoJSON con polígonos reales del IGN, subido a Supabase Storage
-  const r = await fetch('https://dbvjdjsqvytphkmauzep.supabase.co/storage/v1/object/public/imagenes-ora/geojson/departamentos.geojson')
+  const r = await fetch('https://szjxcfntvdyklnnuyepg.supabase.co/storage/v1/object/public/imagenes-ora/geojson/departamentos.geojson')
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   const data = await r.json()
   if (!data.features?.length) throw new Error('GeoJSON vacío')
@@ -4419,7 +4419,7 @@ let _importanciaCache = null
 async function getImportancia() {
   if (_importanciaCache) return _importanciaCache
   try {
-    const r = await fetch('https://dbvjdjsqvytphkmauzep.supabase.co/storage/v1/object/public/imagenes-ora/geojson/importancia_departamentos.json')
+    const r = await fetch('https://szjxcfntvdyklnnuyepg.supabase.co/storage/v1/object/public/imagenes-ora/geojson/importancia_departamentos.json')
     if (!r.ok) return null
     _importanciaCache = await r.json()
   } catch { _importanciaCache = null }
@@ -6657,8 +6657,8 @@ cargarGlobal()
 // PRECIOS DE LINIERS
 // ══════════════════════════════════════════════════════════════════════════════
 
-const P2_URL = 'https://dbvjdjsqvytphkmauzep.supabase.co'
-const P2_KEY = 'sb_publishable_II8D19xUs8uhA-W1o6ldfQ_tulkREPx'
+const P2_URL = 'https://szjxcfntvdyklnnuyepg.supabase.co'
+const P2_KEY = 'sb_publishable_QRCmHDhrHk6rElc169-udw_GiSGiK-B'
 
 const P2_CATS = {
   novillito:  { nombre: 'Novillito',  color: '#0ea5e9' },
@@ -7203,8 +7203,8 @@ function p2RenderGrafRelac() {
 // ROSGAN — índices mensuales de invernada y cría
 // ══════════════════════════════════════════════════════════════════════════════
 
-const RG_URL = 'https://dbvjdjsqvytphkmauzep.supabase.co'
-const RG_KEY = 'sb_publishable_II8D19xUs8uhA-W1o6ldfQ_tulkREPx'
+const RG_URL = 'https://szjxcfntvdyklnnuyepg.supabase.co'
+const RG_KEY = 'sb_publishable_QRCmHDhrHk6rElc169-udw_GiSGiK-B'
 
 // Categorías con color por tipo
 const RG_CATS = {
