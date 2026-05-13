@@ -235,99 +235,88 @@ def fetch_merval_bcra():
     except Exception as e:
         print(f"  ! Merval BCRA: {e}")
 
-# ── 5. PRECIOS GRANOS — BCR API GIX (oficial) ————————————————————————————
+# ── 5. PRECIOS GRANOS — Agrofy API (pizarra multi-plaza) ─────────────────────
 
-BCR_GIX_BASE = "https://api.bcr.com.ar/gix"
+AGROFY_PRECIOS_URL = "https://api-cotizaciones.agrofy.com.ar/api/Prices/GetPricesResumeGroup"
 
-# ID de grano según documentación API GIX → código en nuestra DB
-GRANOS_GIX = {
-    1:  "trigo_rosario",
-    2:  "maiz_rosario",
-    3:  "sorgo_rosario",
-    20: "girasol_rosario",
-    21: "soja_rosario",
+# (nombre_grano_agrofy, nombre_mercado_agrofy) → codigo cultivo en nuestra DB
+AGROFY_PIZARRA_MAP = {
+    ("Soja",    "Rosario"):      "soja_rosario",
+    ("Soja",    "Buenos Aires"): "soja_darsena",
+    ("Soja",    "B.Blanca"):     "soja_bahia_blanca",
+    ("Soja",    "Quequén"):      "soja_quequen",
+    ("Maíz",    "Rosario"):      "maiz_rosario",
+    ("Maíz",    "Buenos Aires"): "maiz_darsena",
+    ("Maíz",    "B.Blanca"):     "maiz_bahia_blanca",
+    ("Maíz",    "Quequén"):      "maiz_quequen",
+    ("Trigo",   "Rosario"):      "trigo_rosario",
+    ("Trigo",   "Buenos Aires"): "trigo_darsena",
+    ("Trigo",   "B.Blanca"):     "trigo_bahia_blanca",
+    ("Trigo",   "Quequén"):      "trigo_quequen",
+    ("Girasol", "Rosario"):      "girasol_rosario",
+    ("Girasol", "B.Blanca"):     "girasol_bahia_blanca",
+    ("Girasol", "Quequén"):      "girasol_quequen",
 }
 
-def _bcr_gix_token(api_key: str, secret: str) -> str | None:
-    """Obtiene Bearer Token de la API GIX. Válido 24 horas."""
-    try:
-        r = requests.post(
-            f"{BCR_GIX_BASE}/Login",
-            json={"api_key": api_key, "secret": secret},
-            timeout=15,
-        )
-        r.raise_for_status()
-        token = r.json().get("data", {}).get("token", "")
-        return token or None
-    except Exception as e:
-        print(f"  ! BCR GIX login: {e}")
-        return None
-
 def fetch_granos_fyo():
-    """Obtiene precios de granos Rosario desde BCR API GIX.
-    Si no hay credenciales configuradas, informa y omite.
-    Registrarse en: https://api.bcr.com.ar/form
-    Secrets requeridos: BCR_GIX_API_KEY y BCR_GIX_SECRET
+    """Obtiene precios pizarra de granos desde la API pública de Agrofy.
+    Sin autenticación. Cubre Rosario, Dársena, Bahía Blanca, Quequén.
+    Formato precio: '455.000,00' (ARS/tn, separador miles=punto, decimal=coma).
     """
-    print("→ Precios granos (BCR API GIX)")
+    print("→ Precios granos pizarra (Agrofy API)")
 
-    api_key = os.environ.get("BCR_GIX_API_KEY", "")
-    secret  = os.environ.get("BCR_GIX_SECRET", "")
-    if not api_key or not secret:
-        print("  ! BCR GIX: credenciales no configuradas.")
-        print("    Registrate en https://api.bcr.com.ar/form y agregá")
-        print("    BCR_GIX_API_KEY y BCR_GIX_SECRET como secrets de GitHub.")
+    try:
+        r = requests.get(AGROFY_PRECIOS_URL, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print(f"  ✗ Agrofy API: {e}")
         return
-
-    token = _bcr_gix_token(api_key, secret)
-    if not token:
-        print("  ! BCR GIX: no se pudo obtener token")
-        return
-
-    headers_auth = {"Authorization": token}
 
     cult_res = sb.table("cultivos").select("id,codigo").execute()
-    cult_ids = {r["codigo"]: r["id"] for r in cult_res.data}
+    cult_ids = {row["codigo"]: row["id"] for row in cult_res.data}
 
-    rows_db = []
-    for id_grano, codigo_cultivo in GRANOS_GIX.items():
-        cult_id = cult_ids.get(codigo_cultivo)
-        if not cult_id:
-            continue
+    def parse_ars(texto: str) -> float | None:
+        limpio = texto.replace(".", "").replace(",", ".").strip()
         try:
-            url = (
-                f"{BCR_GIX_BASE}/PreciosCamara"
-                f"?idGrano={id_grano}"
-                f"&fechaConcertacionDesde={HOY}"
-                f"&fechaConcertacionHasta={HOY}"
-            )
-            r = requests.get(url, headers=headers_auth, timeout=15)
-            if not r.ok:
-                print(f"  ! BCR GIX grano {id_grano}: HTTP {r.status_code}")
+            val = float(limpio)
+            return val if val > 0 else None
+        except ValueError:
+            return None
+
+    rows = []
+    for grano in data:
+        nombre_grano = grano.get("Nombre", "")
+        for tipo in grano.get("Tipos", []):
+            if tipo.get("Nombre") != "Pizarra":
                 continue
-            data = r.json().get("data", [])
-            if not data:
-                continue
-            ultimo = sorted(data, key=lambda x: x.get("fecha_Operacion_Pizarra", ""))[-1]
-            precio_ars = ultimo.get("precio_Cotizacion")
-            precio_usd = ultimo.get("precio_Dolar")
-            fecha      = (ultimo.get("fecha_Operacion_Pizarra") or HOY)[:10]
-            if precio_ars:
-                rows_db.append({
+            # Fecha formato "13-05-26" (DD-MM-YY)
+            fecha_str = tipo.get("Fecha", "")
+            try:
+                fecha = datetime.datetime.strptime(fecha_str, "%d-%m-%y").date().isoformat()
+            except ValueError:
+                fecha = HOY
+
+            for mercado in tipo.get("Mercados", []):
+                precio_str = mercado.get("Precio", "S/C")
+                if not precio_str or precio_str == "S/C":
+                    continue
+                codigo = AGROFY_PIZARRA_MAP.get((nombre_grano, mercado.get("Nombre", "")))
+                if not codigo:
+                    continue
+                cult_id = cult_ids.get(codigo)
+                if not cult_id:
+                    continue
+                precio_ars = parse_ars(precio_str)
+                if not precio_ars:
+                    continue
+                rows.append({
                     "cultivo_id": cult_id,
                     "fecha":      fecha,
-                    "precio_ars": float(precio_ars),
-                    "precio_usd": float(precio_usd) if precio_usd else None,
-                    "zona":       "rosario",
+                    "precio_ars": precio_ars,
                 })
-        except Exception as e:
-            print(f"  ! BCR GIX grano {id_grano}: {e}")
-        time.sleep(0.3)
 
-    if rows_db:
-        upsert("precios_agro", rows_db, "cultivo_id,fecha")
-    else:
-        print("  ! BCR GIX: sin datos para hoy")
+    upsert("precios_agro", rows, "cultivo_id,fecha")
 
 # ── 6. COMBUSTIBLES (ENARSA/SE) ————————————————————————————————————————————
 
